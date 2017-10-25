@@ -533,51 +533,16 @@ begin
 end get_bucket_region;
 
 
-procedure get_object_list (p_bucket_name                 in varchar2,
-                           p_prefix                      in varchar2,
-                           p_max_keys                    in number,
-                           p_list                       out t_object_list,
-                           p_next_continuation_token in out varchar2)
-as
-  l_clob                         clob;
-  l_xml                          xmltype;
-  l_xml_is_truncated             xmltype;
-  l_xml_next_continuation        xmltype;
-
+function get_object_response(p_bucket_name              in varchar2,
+                             p_prefix                   in varchar2,
+                             p_max_keys                 in number,
+                             p_next_continuation_token  in varchar2) return clob is
   l_date_str                     varchar2(255);
   l_auth_str                     varchar2(255);
 
   l_header_names                 t_str_array := t_str_array();
   l_header_values                t_str_array := t_str_array();
-
-  l_returnvalue                  t_object_list;
-
 begin
-
-  /*
-
-  Purpose:   get objects
-
-  Remarks:   see http://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html
-  
-             see http://code.google.com/p/plsql-utils/issues/detail?id=16
-  
-             "I've rewritten get_object_list as an internal procedure that uses the "marker" parameter,
-             so that get_object_tab can now call the Amazon API multiple times to return the complete set of objects.
-             The get_object_list function remains functionally unchanged in this version - it just returns one set of objects -
-             it could be enhanced to support the marker parameter as well, I guess,
-             but I'd rather not expose that sort of thing to the caller personally.
-             The nice thing about the pipelined function is that the subsequent calls to Amazon
-             will only be executed if the client actually fetches all the rows."
-
-  Who     Date        Description
-  ------  ----------  -------------------------------------
-  MBR     15.01.2011  Created
-  JKEMP   14.08.2012  Rewritten as private procedure, see remarks above
-  KJS     06.10.2016  Modified to use newest S3 API which performs much better on large buckets. Changed for-loop to bulk operation.
-
-  */
-
   l_date_str := amazon_aws_auth_pkg.get_date_string;
   l_auth_str := amazon_aws_auth_pkg.get_auth_string ('GET' || chr(10) || chr(10) || chr(10) || l_date_str || chr(10) || '/' || p_bucket_name || '/');
 
@@ -597,10 +562,56 @@ begin
   l_header_values(3) := l_auth_str;
 
   if p_next_continuation_token is not null then
-    l_clob := make_request (get_url(p_bucket_name) || '?list-type=2&continuation-token=' || utl_url.escape(p_next_continuation_token) || '&max-keys=' || p_max_keys || '&prefix=' || utl_url.escape(p_prefix), 'GET', l_header_names, l_header_values, null);
+    return make_request (get_url(p_bucket_name) || '?list-type=2&max-keys=' || p_max_keys || '&prefix=' || utl_url.escape(p_prefix) || '&continuation-token=' || utl_url.escape(p_next_continuation_token, true), 'GET', l_header_names, l_header_values, null);
   else
-    l_clob := make_request (get_url(p_bucket_name) || '?list-type=2&max-keys=' || p_max_keys || '&prefix=' || utl_url.escape(p_prefix), 'GET', l_header_names, l_header_values, null);
+    return make_request (get_url(p_bucket_name) || '?list-type=2&max-keys=' || p_max_keys || '&prefix=' || utl_url.escape(p_prefix), 'GET', l_header_names, l_header_values, null);
   end if;
+end get_object_response;
+
+procedure get_object_list (p_bucket_name                 in varchar2,
+                           p_prefix                      in varchar2,
+                           p_max_keys                    in number,
+                           p_list                       out t_object_list,
+                           p_next_continuation_token in out varchar2)
+as
+  l_clob                         clob;
+  l_xml                          xmltype;
+  l_xml_is_truncated             xmltype;
+  l_xml_next_continuation        xmltype;
+
+  l_returnvalue                  t_object_list;
+
+begin
+
+  /*
+
+  Purpose:   get objects
+
+  Remarks:   see http://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html
+
+             see http://code.google.com/p/plsql-utils/issues/detail?id=16
+
+             "I've rewritten get_object_list as an internal procedure that uses the "marker" parameter,
+             so that get_object_tab can now call the Amazon API multiple times to return the complete set of objects.
+             The get_object_list function remains functionally unchanged in this version - it just returns one set of objects -
+             it could be enhanced to support the marker parameter as well, I guess,
+             but I'd rather not expose that sort of thing to the caller personally.
+             The nice thing about the pipelined function is that the subsequent calls to Amazon
+             will only be executed if the client actually fetches all the rows."
+
+  Who     Date        Description
+  ------  ----------  -------------------------------------
+  MBR     15.01.2011  Created
+  JKEMP   14.08.2012  Rewritten as private procedure, see remarks above
+  KJS     06.10.2016  Modified to use newest S3 API which performs much better on large buckets. Changed for-loop to bulk operation.
+
+  */
+
+  l_clob := get_object_response(p_bucket_name             => p_bucket_name,
+                                p_prefix                  => p_prefix,
+                                p_max_keys                => p_max_keys,
+                                p_next_continuation_token => p_next_continuation_token);
+
   if (l_clob is not null) and (length(l_clob) > 0) then
 
     l_xml := xmltype (l_clob);
@@ -612,10 +623,10 @@ begin
       to_date(extractValue(value(t), '*/LastModified', g_aws_namespace_s3_full), g_date_format_xml)
     bulk collect into l_returnvalue
     from table(xmlsequence(l_xml.extract('//ListBucketResult/Contents', g_aws_namespace_s3_full))) t;
-      
+
     -- check if this is the last set of data or not, and set the in/out p_next_continuation_token as expected
     l_xml_is_truncated := l_xml.extract('//ListBucketResult/IsTruncated/text()', g_aws_namespace_s3_full);
-    
+
     if l_xml_is_truncated is not null and l_xml_is_truncated.getStringVal = 'true' then
       l_xml_next_continuation := l_xml.extract('//ListBucketResult/NextContinuationToken/text()', g_aws_namespace_s3_full);
       if l_xml_next_continuation is not null then
@@ -875,6 +886,84 @@ begin
   check_for_errors (l_clob);
 
 end delete_object;
+
+procedure copy_object (p_src_bucket_name in varchar2,
+                       p_src_key in varchar2,
+                       p_dest_bucket_name in varchar2,
+                       p_dest_key in varchar2,                         
+                       p_acl in varchar2 := null) is
+  l_src_key                      varchar2(4000) := utl_url.escape (p_src_key);
+  l_dest_key                     varchar2(4000) := utl_url.escape (p_dest_key);
+
+  l_clob                         clob;
+
+  l_date_str                     varchar2(255);
+  l_auth_str                     varchar2(255);
+
+  l_header_names                 t_str_array := t_str_array();
+  l_header_values                t_str_array := t_str_array();
+
+begin
+
+  /*
+
+  Purpose:   copy existing object to new destination
+
+  Remarks:   see  http://docs.aws.amazon.com/AmazonS3/latest/API/RESTObjectCOPY.html
+
+  Who     Date        Description
+  ------  ----------  -------------------------------------
+  KJS     24.01.2017  Created
+
+  */
+
+  l_date_str := amazon_aws_auth_pkg.get_date_string;
+
+  if p_acl is not null then
+    l_auth_str := amazon_aws_auth_pkg.get_auth_string ('PUT' || chr(10) || chr(10) || chr(10) || 
+                                                       l_date_str || chr(10) ||                                                        
+                                                       'x-amz-acl:' || p_acl || chr(10) || 
+                                                       'x-amz-copy-source:' || '/' || p_src_bucket_name || '/' || l_src_key || chr(10) || 
+                                                       '/' || p_dest_bucket_name || '/' || l_dest_key);
+  else
+    l_auth_str := amazon_aws_auth_pkg.get_auth_string ('PUT' || chr(10) || chr(10) || chr(10) ||
+                                                       l_date_str || chr(10) || 
+                                                       'x-amz-copy-source:' || '/' || p_src_bucket_name || '/' || l_src_key || chr(10) || 
+                                                       '/' || p_dest_bucket_name || '/' || l_dest_key);
+  end if;
+
+  l_header_names.extend;
+  l_header_names(1) := 'Host';
+  l_header_values.extend;
+  l_header_values(1) := get_host(p_dest_bucket_name);
+
+  l_header_names.extend;
+  l_header_names(2) := 'Date';
+  l_header_values.extend;
+  l_header_values(2) := l_date_str;
+
+  l_header_names.extend;
+  l_header_names(3) := 'Authorization';
+  l_header_values.extend;
+  l_header_values(3) := l_auth_str;
+
+  l_header_names.extend;
+  l_header_names(4) := 'x-amz-copy-source';
+  l_header_values.extend;
+  l_header_values(4) := '/' || p_src_bucket_name || '/' || l_src_key;
+
+  -- Per documentation, default ACL is always private to the authorized user, that is, this API does not copy the existing object ACL
+  if p_acl is not null then
+    l_header_names.extend;
+    l_header_names(5) := 'x-amz-acl';
+    l_header_values.extend;
+    l_header_values(5) := p_acl;
+  end if;
+
+  l_clob := make_request (get_url (p_src_bucket_name, l_dest_key), 'PUT', l_header_names, l_header_values);
+
+  check_for_errors (l_clob);
+end copy_object;
 
 
 function get_object (p_bucket_name in varchar2,
@@ -1203,4 +1292,3 @@ end set_object_acl;
 
 end amazon_aws_s3_pkg;
 /
-
